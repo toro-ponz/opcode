@@ -88,13 +88,6 @@ jobs:
       env:
         NODE_OPTIONS: "--max_old_space_size=4096"
 
-    - name: Verify Tauri version compatibility
-      run: |
-        echo "Checking Tauri versions..."
-        bun list | Select-String "@tauri-apps" -ErrorAction SilentlyContinue
-        echo "Cargo.toml Tauri dependencies:"
-        Get-Content "src-tauri/Cargo.toml" | Select-String "tauri"
-
     - name: Build Tauri app for Windows
       run: bun run tauri build
       env:
