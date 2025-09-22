@@ -21,6 +21,11 @@ jobs:
         node-version: '18'
         cache: 'npm'
 
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v1
+      with:
+        bun-version: latest
+
     - name: Setup Rust
       uses: actions-rs/toolchain@v1
       with:
@@ -33,72 +38,86 @@ jobs:
       with:
         workspaces: './src-tauri -> target'
 
-    - name: Clear npm cache and reinstall dependencies
+    - name: Clear cache and install dependencies with Bun
       run: |
-        npm cache clean --force
-        if (Test-Path "package-lock.json") { Remove-Item "package-lock.json" -Force }
+        if (Test-Path "bun.lockb") { Remove-Item "bun.lockb" -Force }
         if (Test-Path "node_modules") { Remove-Item "node_modules" -Recurse -Force }
-        npm install --no-optional
-        npm install @rollup/rollup-win32-x64-msvc --save-dev --force
+        bun install
+
+    - name: Install Rollup Windows native dependencies
+      run: |
+        bun add @rollup/rollup-win32-x64-msvc --dev
 
     - name: Fix Tauri version mismatches
       run: |
         echo "Updating Tauri dependencies to fix version mismatches..."
         
-        # Update NPM Tauri packages to match Rust crate versions
-        npm install @tauri-apps/api@~2.5.0 --save
-        npm install @tauri-apps/plugin-dialog@~2.2.0 --save
-        npm install @tauri-apps/plugin-global-shortcut@~2.2.0 --save
-        npm install @tauri-apps/plugin-shell@~2.2.0 --save
-        
-        # Alternatively, update Rust crates to match NPM versions
-        # This approach updates the Cargo.toml to use the latest compatible versions
+        # Update Tauri packages to compatible versions
+        bun add @tauri-apps/api@~2.5.0
+        bun add @tauri-apps/plugin-dialog@~2.2.0
+        bun add @tauri-apps/plugin-global-shortcut@~2.2.0
+        bun add @tauri-apps/plugin-shell@~2.2.0
 
     - name: Update Cargo.toml for version compatibility
       run: |
         $cargoToml = Get-Content "src-tauri/Cargo.toml" -Raw
         
-        # Update tauri crate to match NPM version (2.8.x compatible)
-        $cargoToml = $cargoToml -replace 'tauri = \{ version = "2"', 'tauri = { version = "2.8"'
+        # Update tauri crate to match NPM version (2.5.x compatible)
+        $cargoToml = $cargoToml -replace 'tauri = \{ version = "2"', 'tauri = { version = "2.5"'
         
         # Update plugin versions to match NPM versions
-        $cargoToml = $cargoToml -replace 'tauri-plugin-dialog = "2"', 'tauri-plugin-dialog = "2.4"'
-        $cargoToml = $cargoToml -replace 'tauri-plugin-global-shortcut = "2"', 'tauri-plugin-global-shortcut = "2.3"'
-        $cargoToml = $cargoToml -replace 'tauri-plugin-shell = "2"', 'tauri-plugin-shell = "2.3"'
+        $cargoToml = $cargoToml -replace 'tauri-plugin-dialog = "2"', 'tauri-plugin-dialog = "2.2"'
+        $cargoToml = $cargoToml -replace 'tauri-plugin-global-shortcut = "2"', 'tauri-plugin-global-shortcut = "2.2"'
+        $cargoToml = $cargoToml -replace 'tauri-plugin-shell = "2"', 'tauri-plugin-shell = "2.2"'
         
         Set-Content "src-tauri/Cargo.toml" -Value $cargoToml
         
         echo "Updated Cargo.toml:"
         Get-Content "src-tauri/Cargo.toml" | Select-String "tauri"
 
-    - name: Verify Tauri version compatibility
+    - name: Check Tauri configuration
       run: |
-        echo "Checking Tauri versions..."
-        npm list | Select-String "@tauri-apps"
-        echo "Cargo.toml Tauri dependencies:"
-        Get-Content "src-tauri/Cargo.toml" | Select-String "tauri"
+        echo "Checking tauri.conf.json for beforeBuildCommand..."
+        if (Test-Path "src-tauri/tauri.conf.json") {
+          Get-Content "src-tauri/tauri.conf.json" | Select-String "beforeBuildCommand"
+        }
 
-    - name: Build frontend
+    - name: Build frontend with Bun
       run: |
-        npm run build
+        bun run build
       env:
         NODE_OPTIONS: "--max_old_space_size=4096"
 
+    - name: Verify Tauri version compatibility
+      run: |
+        echo "Checking Tauri versions..."
+        bun list | Select-String "@tauri-apps" -ErrorAction SilentlyContinue
+        echo "Cargo.toml Tauri dependencies:"
+        Get-Content "src-tauri/Cargo.toml" | Select-String "tauri"
+
     - name: Build Tauri app for Windows
-      run: npm run tauri build
+      run: bun run tauri build
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         RUST_BACKTRACE: 1
 
     - name: List build artifacts
       run: |
-        Get-ChildItem -Path "src-tauri\target\release\bundle" -Recurse -File | ForEach-Object { Write-Host $_.FullName }
+        echo "Searching for build artifacts..."
+        if (Test-Path "src-tauri\target\release\bundle") {
+          Get-ChildItem -Path "src-tauri\target\release\bundle" -Recurse -File | ForEach-Object { Write-Host $_.FullName }
+        } else {
+          echo "Bundle directory not found, checking target directory..."
+          Get-ChildItem -Path "src-tauri\target" -Recurse -Name "*.msi", "*.exe" | ForEach-Object { Write-Host $_ }
+        }
 
     - name: Upload Windows MSI
       uses: actions/upload-artifact@v4
       with:
         name: windows-msi-${{ github.run_number }}
-        path: src-tauri/target/release/bundle/msi/*.msi
+        path: |
+          src-tauri/target/release/bundle/msi/*.msi
+          src-tauri/target/release/*.msi
         retention-days: 30
       if: always()
 
@@ -106,7 +125,19 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: windows-nsis-${{ github.run_number }}
-        path: src-tauri/target/release/bundle/nsis/*.exe
+        path: |
+          src-tauri/target/release/bundle/nsis/*.exe
+          src-tauri/target/release/*.exe
+        retention-days: 30
+      if: always()
+
+    - name: Upload Windows Portable
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-portable-${{ github.run_number }}
+        path: |
+          src-tauri/target/release/bundle/portable/*.exe
+          src-tauri/target/release/opcode.exe
         retention-days: 30
       if: always()
 
@@ -121,12 +152,30 @@ jobs:
       with:
         name: windows-msi-${{ github.run_number }}
         path: ./msi-artifacts
+      continue-on-error: true
 
     - name: Download NSIS artifacts
       uses: actions/download-artifact@v4
       with:
         name: windows-nsis-${{ github.run_number }}
         path: ./nsis-artifacts
+      continue-on-error: true
+
+    - name: Download Portable artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: windows-portable-${{ github.run_number }}
+        path: ./portable-artifacts
+      continue-on-error: true
+
+    - name: List all artifacts
+      run: |
+        echo "MSI artifacts:"
+        find ./msi-artifacts -type f 2>/dev/null || echo "No MSI artifacts found"
+        echo "NSIS artifacts:"
+        find ./nsis-artifacts -type f 2>/dev/null || echo "No NSIS artifacts found"
+        echo "Portable artifacts:"
+        find ./portable-artifacts -type f 2>/dev/null || echo "No Portable artifacts found"
 
     - name: Get current date
       id: date
@@ -141,31 +190,34 @@ jobs:
         tag_name: windows-build-${{ steps.date.outputs.date }}
         release_name: Windows Build ${{ steps.date.outputs.date }}
         body: |
-          自動生成されたWindows版ビルド
+          自動生成されたWindows版ビルド (Bun対応版)
           
           **含まれるファイル:**
           - MSI インストーラー
           - NSIS インストーラー
+          - ポータブル版実行ファイル
           
           **ビルド情報:**
           - ビルド番号: ${{ github.run_number }}
           - コミット: ${{ github.sha }}
           - 日時: ${{ steps.date.outputs.date }}
+          - ビルドツール: Bun + Tauri
           
           **修正されたバージョン不一致:**
-          - tauri: 2.8.x
-          - tauri-plugin-dialog: 2.4.x
-          - tauri-plugin-global-shortcut: 2.3.x
-          - tauri-plugin-shell: 2.3.x
+          - tauri: 2.5.x
+          - tauri-plugin-dialog: 2.2.x
+          - tauri-plugin-global-shortcut: 2.2.x
+          - tauri-plugin-shell: 2.2.x
         draft: false
         prerelease: true
 
-    - name: Upload MSI to release
+    - name: Upload artifacts to release
       run: |
+        # Upload MSI files
         for file in ./msi-artifacts/*.msi; do
           if [ -f "$file" ]; then
             filename=$(basename "$file")
-            echo "Uploading $filename..."
+            echo "Uploading MSI: $filename..."
             curl -X POST \
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Content-Type: application/octet-stream" \
@@ -173,17 +225,29 @@ jobs:
               "${{ steps.create_release.outputs.upload_url }}?name=${filename}&label=Windows MSI Installer"
           fi
         done
-
-    - name: Upload NSIS to release
-      run: |
+        
+        # Upload NSIS files
         for file in ./nsis-artifacts/*.exe; do
           if [ -f "$file" ]; then
             filename=$(basename "$file")
-            echo "Uploading $filename..."
+            echo "Uploading NSIS: $filename..."
             curl -X POST \
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Content-Type: application/octet-stream" \
               --data-binary @"$file" \
-              "${{ steps.create_release.outputs.upload_url }}?name=${filename}&label=Windows EXE Installer"
+              "${{ steps.create_release.outputs.upload_url }}?name=${filename}&label=Windows NSIS Installer"
+          fi
+        done
+        
+        # Upload Portable files
+        for file in ./portable-artifacts/*.exe; do
+          if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            echo "Uploading Portable: $filename..."
+            curl -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file" \
+              "${{ steps.create_release.outputs.upload_url }}?name=${filename}&label=Windows Portable Executable"
           fi
         done
